@@ -766,7 +766,10 @@ proc toVariant*[I, T](s: array[I, T]): Variant =
 
 proc fromVariant*[T](s: var seq[T], val: Variant): ConversionResult =
   if val.getType() == VariantType.Nil:
-    s = nil
+    when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
+      s = nil
+    else:
+      s = @[]
   elif val.getType() == VariantType.Array:
     let arr = val.asArray()
     var newS = newSeq[T](arr.len)
