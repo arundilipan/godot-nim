@@ -757,8 +757,9 @@ template arrayToVariant(s: untyped): Variant =
   newVariant(arr)
 
 proc toVariant*[T](s: seq[T]): Variant =
-  if s.isNil:
-    return newVariant()
+  when (NimMajor, NimMinor, NimPatch) <= (0, 19, 0)
+    if s.isNil:
+      return newVariant()
   result = arrayToVariant(s)
 
 proc toVariant*[I, T](s: array[I, T]): Variant =
