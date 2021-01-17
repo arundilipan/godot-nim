@@ -757,7 +757,7 @@ template arrayToVariant(s: untyped): Variant =
   newVariant(arr)
 
 proc toVariant*[T](s: seq[T]): Variant =
-  when (NimMajor, NimMinor, NimPatch) <= (0, 19, 0)
+  when (NimMajor, NimMinor, NimPatch) <= (0, 19, 0):
     if s.isNil:
       return newVariant()
   result = arrayToVariant(s)
