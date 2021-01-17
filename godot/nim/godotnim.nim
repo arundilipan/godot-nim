@@ -27,7 +27,8 @@ import godotinternal
 ## the type to be editable from the editor.
 
 type
-  NimGodotObject* = ref object of RootObj
+  NimGodotObject* = ref NimGodotObj
+  NimGodotObj = object of RootObj
     ## The base type all Godot types inherit from.
     ## Manages lifecycle of the wrapped ``GodotObject``.
     godotObject: ptr GodotObject
@@ -187,16 +188,19 @@ proc deinit*(obj: NimGodotObject) =
   obj.godotObject.deinit()
   obj.godotObject = nil
 
-proc linkedObject(obj: NimGodotObject): NimGodotObject {.inline.} =
-  cast[NimGodotObject](obj.linkedObjectPtr)
-
-proc nimGodotObjectFinalizer*[T: NimGodotObject](obj: T) =
+proc `=destroy`*(obj: var NimGodotObj) =
   if obj.godotObject.isNil or obj.isNative: return
   # important to set it before so that ``unreference`` is aware
   obj.isFinalized = true
-  if (obj.isRef or not obj.linkedObject.isNil and obj.linkedObject.isRef) and
-     obj.godotObject.unreference():
-    obj.deinit()
+
+  let linkedGodotObject = cast[NimGodotObject](obj.linkedObjectPtr)
+  if (obj.isRef or not linkedGodotObject.isNil and linkedGodotObject.isRef) and
+    obj.godotObject.unreference():
+    obj.godotObject.deinit()
+    obj.godotObject = nil
+
+proc linkedObject(obj: NimGodotObject): NimGodotObject {.inline.} =
+  cast[NimGodotObject](obj.linkedObjectPtr)
 
 macro baseNativeType(T: typedesc): cstring =
   var t = getType(getType(T)[1][1])
@@ -206,7 +210,7 @@ macro baseNativeType(T: typedesc): cstring =
     if typeName in nativeClasses:
       baseT = typeName
       break
-    if typeName == "NimGodotObject":
+    if typeName == "NimGodotObj":
       break
     t = getType(t[1][1])
   if baseT.len == 0:
@@ -222,7 +226,7 @@ proc inherits(t: NimNode, parent: string): bool {.compileTime.} =
     let typeName = ($curT[1][1]).split(':')[0]
     if typeName == parent:
       return true
-    if typeName == "NimGodotObject":
+    if typeName == "NimGodotObj":
       break
     curT = getType(curT[1][1])
 
@@ -241,9 +245,7 @@ template registerClass*(T: typedesc; godotClassName: string or cstring,
   if classRegistry.isNil:
     classRegistry = newTable[FNV1Hash, ObjectInfo]()
   let constructor = proc(): NimGodotObject =
-    var t: T
-    new(t, nimGodotObjectFinalizer[T])
-    result = t
+    result = new(T)
 
   const base = baseNativeType(T)
   const isRef: bool = isReference(T)
@@ -424,7 +426,7 @@ proc gdnew*[T: NimGodotObject](): T =
   const objInfo = classRegistryStatic[fnv1Hash(godotName)]
   when objInfo.isNative:
     let godotObject = getClassConstructor(cGodotName)()
-    new(result, nimGodotObjectFinalizer[T])
+    new(result)
     result.godotObject = godotObject
     when objInfo.isRef:
       godotObject.initRef()
@@ -757,9 +759,6 @@ template arrayToVariant(s: untyped): Variant =
   newVariant(arr)
 
 proc toVariant*[T](s: seq[T]): Variant =
-  when (NimMajor, NimMinor, NimPatch) <= (0, 19, 0):
-    if s.isNil:
-      return newVariant()
   result = arrayToVariant(s)
 
 proc toVariant*[I, T](s: array[I, T]): Variant =
@@ -770,7 +769,7 @@ proc fromVariant*[T](s: var seq[T], val: Variant): ConversionResult =
     when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
       s = nil
     else:
-      s = @[]
+      s = @[] # seq can't be nil in modern nim
   elif val.getType() == VariantType.Array:
     let arr = val.asArray()
     var newS = newSeq[T](arr.len)
@@ -868,12 +867,6 @@ proc fromVariant*[T: Table or TableRef or OrderedTable or OrderedTableRef](t: va
   else:
     result = ConversionResult.TypeError
 
-when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
-  {.emit: """/*TYPESECTION*/
-  N_LIB_EXPORT N_CDECL(void, NimMain)(void);
-  N_NOINLINE(void, setStackBottom)(void* thestackbottom);
-  """.}
-
 var nativeLibHandle: pointer
 proc getNativeLibHandle*(): pointer =
   ## Returns NativeScript library handle used to register type information
@@ -883,20 +876,9 @@ proc getNativeLibHandle*(): pointer =
 proc godot_nativescript_init(handle: pointer) {.
     cdecl, exportc, dynlib.} =
   nativeLibHandle = handle
-
-  var stackBottom {.volatile.}: pointer
-  stackBottom = addr(stackBottom)
   {.emit: """
     NimMain();
   """.}
-  when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
-    {.emit: """
-      setStackBottom((void*)(&`stackBottom`));
-    """.}
-  else:
-    nimGC_setStackBottom(stackBottom)
-  GC_fullCollect()
-  GC_disable()
 
 proc godot_gdnative_init(options: ptr GDNativeInitOptions) {.
     cdecl, exportc, dynlib.} =
@@ -905,8 +887,7 @@ proc godot_gdnative_init(options: ptr GDNativeInitOptions) {.
 
 proc godot_gdnative_terminate(options: ptr GDNativeTerminateOptions) {.
     cdecl, exportc, dynlib.} =
-  if not options[].inEditor or not compileOption("threads"):
-    deallocHeap(runFinalizers = not options[].inEditor, allowGcAfterwards = false)
+  discard
 
 const nimGcStepLengthUs {.intdefine.} = 2000
 
@@ -929,33 +910,17 @@ proc registerFrameCallback*(cb: proc () {.closure.}) =
 {.push stackTrace: off.}
 
 proc godot_nativescript_frame() {.cdecl, exportc, dynlib.} =
-  var stackBottom {.volatile.}: pointer
-  stackBottom = addr(stackBottom)
-  when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
-    {.emit: """
-      setStackBottom((void*)(&`stackBottom`));
-    """.}
-  else:
-    nimGC_setStackBottom(stackBottom)
   for cb in idleCallbacks:
     cb()
-  GC_step(nimGcStepLengthUs, true, 0)
 
 when not defined(release):
   onUnhandledException = proc(errorMsg: string) =
     printError("Unhandled Nim exception: " & errorMsg)
 
 proc godot_nativescript_thread_enter() {.cdecl, exportc, dynlib.} =
-  when compileOption("threads"):
-    setupForeignThreadGc()
-  else:
-    const err = cstring"A foreign thread is created, but app is compiled without --threads:on. Bad things will happen if Nim code is invoked from this thread. If you see this warning when running the editor and you don't actually use threads, ignore it."
-    var s = err.toGodotString()
-    godotPrint(s)
-    s.deinit()
+  discard
 
 proc godot_nativescript_thread_exit() {.cdecl, exportc, dynlib.} =
-  when compileOption("threads"):
-    teardownForeignThreadGc()
+  discard
 
 {.pop.} # stackTrace: off
